@@ -135,17 +135,29 @@ async function PlaceIDSorgula(PlaceIDBilgisi) {
     const Ref = new URL(Baglanti).host;
 
     try {
-        const response = await axios.get(Baglanti, {
+        // PHP'nin davranışını simüle etmek için:
+        // 1. IPv4 zorla (PHP curl genelde v4 tercih eder/ayarlıdır)
+        // 2. SSL sertifika kontrolünü kapat (CURLOPT_SSL_VERIFYPEER = false)
+        const https = require('https');
+        const agent = new https.Agent({  
+            rejectUnauthorized: false,
+            family: 4
+        });
+
+        const axiosConfig = {
             headers: {
                 ...Header,
                 'Referer': 'http://' + Ref
             },
+            httpsAgent: agent, // Agent'ı ekle
             maxRedirects: 5,
             timeout: 30000,
             validateStatus: function (status) {
                 return status >= 200 && status < 400;
             }
-        });
+        };
+
+        const response = await axios.get(Baglanti, axiosConfig);
 
         const Kaynak = response.data;
 
