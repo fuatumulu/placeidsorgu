@@ -14,7 +14,10 @@
 
 require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
+// Axios yerine native curl kullanacağız
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,8 +27,9 @@ const API_TOKEN = process.env.API_TOKEN || 'default-secret-token';
 app.use(express.json());
 
 // Request headers - PHP'deki $Header dizisinin birebir karşılığı
-const Header = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+// Curl komutuna argüman olarak eklenecek
+const UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0';
+const HeadersMap = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'tr-TR,tr;q=0.8,en-US;q=0.5,en;q=0.3',
     'DNT': '1',
@@ -36,6 +40,7 @@ const Header = {
     'Sec-Fetch-Mode': 'navigate',
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1'
+    // Referer dinamik eklenecek
 };
 
 /**
@@ -51,7 +56,6 @@ function authMiddleware(req, res, next) {
         });
     }
 
-    // Bearer token formatı: "Bearer <token>"
     const tokenValue = token.startsWith('Bearer ') ? token.slice(7) : token;
 
     if (tokenValue !== API_TOKEN) {
@@ -66,100 +70,74 @@ function authMiddleware(req, res, next) {
 
 /**
  * Recursive olarak JSON ağacında website bilgisini arar.
- * Aranan Pattern: [URL, DomainText, ...]
- * @param {Array|Object} data 
- * @param {number} depth 
- * @returns {string|null} Bulunan URL
  */
 function findWebsiteInTree(data, depth = 0) {
-    if (depth > 50) return null; // Derinlik sınırı artırıldı (Google Maps verisi derin olabilir)
+    if (depth > 50) return null;
     if (!data || typeof data !== 'object') return null;
 
     if (Array.isArray(data)) {
-        // Pattern kontrolü: ["http...", "string", ...]
         if (data.length >= 2 && typeof data[0] === 'string' && typeof data[1] === 'string') {
             const url = data[0];
             const text = data[1];
 
             if (url.startsWith('http://') || url.startsWith('https://')) {
-                // Google harita/içerik linklerini ele (Çok kaba filtreleme, dikkatli olunmalı)
                 const isGoogleMapLink = url.includes('google.com/maps') || url.includes('google.com/local') || url.includes('ggpht.com');
-
                 if (!isGoogleMapLink) {
-                    // Bulundu!
-                    // Güvenilirlik kontrolü: text url içinde geçiyor mu veya benzer mi?
-                    // Genellikle text domain adıdır.
                     return url;
                 }
             }
         }
 
-        // Alt elemanları gez
         for (const item of data) {
             const res = findWebsiteInTree(item, depth + 1);
             if (res) return res;
         }
     }
-
     return null;
 }
 
 /**
- * PlaceIDDurum değerini bulmaya çalışır
- * Pattern: [..., [...], ..., INT_STATUS] (genellikle bir integer)
- * PHP kodunda 78. index veya 227. index civarıydı.
- * @param {Array} data 
+ * Native Curl ile istek atar
  */
-function findStatusInTree(data) {
-    // Bu değer çok spesifik olduğu için genel bir arama zor.
-    // Şimdilik eski mantıkla belirli path'lere bakmak veya "Claim this business" stringini aramak mantıklı olabilir.
-    // PHP kodunda `PlaceIDDurum` claim durumu (sahip olunan/olunmayan) ile ilgiliydi.
-    // Eğer bulamazsak 4 dönüyoruz.
+async function curlFetch(url, referer) {
+    // Komut oluşturma
+    // -L: Follow redirects
+    // -k: Insecure (SSL verify false) - PHP'deki gibi
+    // -4: Force IPv4 - PHP'deki gibi
+    // --silent: Progress bar gösterme
+    let cmd = `curl -L -k -4 --silent -A "${UserAgent}"`;
+    
+    // Headerları ekle
+    for (const [key, value] of Object.entries(HeadersMap)) {
+        cmd += ` -H "${key}: ${value}"`;
+    }
+    
+    // Referer ekle
+    cmd += ` -H "Referer: ${referer}"`;
+    
+    // URL ekle (son argüman)
+    cmd += ` "${url}"`;
 
-    if (!Array.isArray(data)) return null;
-
-    // Genellikle büyük array'in içinde spesifik indekslerde olur.
-    // User verisinde: 9. index website ise, status nerede?
-    // Şimdilik null dönelim, ana fonksiyonda default değer atanır.
-    return null;
-}
-
-/**
- * Place ID ile Google Maps'den website bilgisini çeker
- * @param {string} PlaceIDBilgisi - Google Place ID
- * @returns {Promise<Object>} - Website bilgisi ve durum
- */
-async function PlaceIDSorgula(PlaceIDBilgisi) {
-
-    const Baglanti = 'https://www.google.com/maps/place/?q=place_id:' + PlaceIDBilgisi.trim() + '&hl=en';
-    const Ref = new URL(Baglanti).host;
+    // console.log("Executing Curl:", cmd);
 
     try {
-        // PHP'nin davranışını simüle etmek için:
-        // 1. IPv4 zorla (PHP curl genelde v4 tercih eder/ayarlıdır)
-        // 2. SSL sertifika kontrolünü kapat (CURLOPT_SSL_VERIFYPEER = false)
-        const https = require('https');
-        const agent = new https.Agent({  
-            rejectUnauthorized: false,
-            family: 4
-        });
+        const { stdout, stderr } = await execPromise(cmd, { maxBuffer: 1024 * 1024 * 10 }); // 10MB buffer
+        if (!stdout && stderr) {
+            throw new Error(stderr);
+        }
+        return stdout;
+    } catch (error) {
+        throw error;
+    }
+}
 
-        const axiosConfig = {
-            headers: {
-                ...Header,
-                'Referer': 'http://' + Ref
-            },
-            httpsAgent: agent, // Agent'ı ekle
-            maxRedirects: 5,
-            timeout: 30000,
-            validateStatus: function (status) {
-                return status >= 200 && status < 400;
-            }
-        };
+async function PlaceIDSorgula(PlaceIDBilgisi) {
+    const Baglanti = 'https://www.google.com/maps/place/?q=place_id:' + PlaceIDBilgisi.trim() + '&hl=en';
+    const Ref = 'http://' + new URL(Baglanti).host;
 
-        const response = await axios.get(Baglanti, axiosConfig);
-
-        const Kaynak = response.data;
+    try {
+        // Axios yerine Curl kullanıyoruz
+        const Kaynak = await curlFetch(Baglanti, Ref);
 
         // XSSI prefix veya HTML içinden JSON çekme
         let mainJsonString = Kaynak;
@@ -169,26 +147,22 @@ async function PlaceIDSorgula(PlaceIDBilgisi) {
             if (Kaynak.trim().startsWith(")]}'")) {
                 mainJsonString = Kaynak.replace(")]}'", '').trim();
             } else {
-                // Regex patternleri (Öncelik sırasına göre)
-                // PHP'deki ve testlerdeki varyasyonlar
                 const patterns = [
-                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*window\.APP_FLAGS/, // Orijinal
-                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*this\.gbar_/,       // Yaygın Yeni
-                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*var\s/,             // Alternatif
-                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*window\./,          // Alternatif
-                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);/                  // En Geniş
+                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*window\.APP_FLAGS/,
+                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*this\.gbar_/,
+                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*var\s/,
+                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);\s*window\./,
+                    /window\.APP_INITIALIZATION_STATE\s*=\s*(.*?);/
                 ];
 
                 let match = null;
                 for (const pattern of patterns) {
                     match = Kaynak.match(pattern);
                     if (match && match[1]) {
-                        // Basit JSON validasyonu
                         const candidate = match[1].trim();
                         if (candidate.startsWith('[') && candidate.endsWith(']')) {
                             mainJsonString = candidate;
                             fromHtml = true;
-                            // console.log(`[DEBUG] Regex eşleşmesi: ${pattern}`);
                             break;
                         }
                     }
@@ -209,44 +183,29 @@ async function PlaceIDSorgula(PlaceIDBilgisi) {
             return { success: false, PlaceIDDurum: 4, WebSitesi: null, error: 'JSON parse hatası' };
         }
 
-        // Veri bloklarını belirle
-        let WebSitesi = null;
+        let WebSitesi = findWebsiteInTree(mainData);
 
-        // 1. Doğrudan mainData içinde ara (Recursion)
-        WebSitesi = findWebsiteInTree(mainData);
-
-        // 2. Özel index kontrolü: [3][6] (PHP'de kullanılan yol) için özel denetim ve hata logu
         if (!WebSitesi) {
             if (Array.isArray(mainData)) {
-                // Veri var mı diye bak (Bot kontrolü)
                 if (!mainData[3] || (Array.isArray(mainData[3]) && mainData[3].length === 0)) {
-                    console.log(`[UYARI] Beklenen veri indeksi (mainData[3]) boş veya eksik. Google 'Lite' sayfa göndermiş olabilir.`);
+                    console.log(`[UYARI] Beklenen veri indeksi (mainData[3]) boş veya eksik. Lite yanıt.`);
                 } else if (mainData[3][6]) {
-                    // Veri string olarak saklanmış olabilir (XSSI)
                     if (typeof mainData[3][6] === 'string' && mainData[3][6].startsWith(")]}'")) {
                         try {
                             const innerData = JSON.parse(mainData[3][6].replace(")]}'", '').trim());
                             WebSitesi = findWebsiteInTree(innerData);
-                        } catch (e) {
-                            console.log(`[HATA] İç JSON parse hatası (index 3,6).`);
-                        }
+                        } catch (e) { }
                     } else if (typeof mainData[3][6] === 'string') {
-                        // Belki direkt JSON stringdir (XSSI prefixsiz)
                         try {
                             const innerData = JSON.parse(mainData[3][6]);
                             WebSitesi = findWebsiteInTree(innerData);
-                        } catch (e) {/*ignore*/ }
+                        } catch (e) { }
                     }
                 }
             }
         }
 
-        let PlaceIDDurum = 4;
-        if (WebSitesi) {
-            PlaceIDDurum = 1; // Website var
-        } else {
-            PlaceIDDurum = 0; // Website yok
-        }
+        let PlaceIDDurum = WebSitesi ? 1 : 0;
 
         return {
             success: true,
@@ -256,19 +215,16 @@ async function PlaceIDSorgula(PlaceIDBilgisi) {
         };
 
     } catch (error) {
-        console.error(`[HATA] Axios İsteği Başarısız: ${error.message}`);
+        console.error(`[HATA] Curl İsteği Başarısız: ${error.message}`);
         return {
             success: false,
             PlaceIDDurum: 4,
             WebSitesi: null,
-            error: 'HTTP isteği başarısız: ' + error.message
+            error: 'İstek başarısız: ' + error.message
         };
     }
 }
 
-/**
- * Domain eşleşme kontrolü
- */
 function domainEslesiyor(WebSitesi, domain) {
     if (!WebSitesi || !domain) return false;
     return WebSitesi.toLowerCase().includes(domain.toLowerCase());
@@ -313,7 +269,7 @@ app.post('/api/check', authMiddleware, async (req, res) => {
                 websiteFound: websiteFound,
                 website: sonuc.WebSitesi,
                 domainMatch: domainMatch,
-                status: sonuc.PlaceIDDurum // 1: Var, 0: Yok, 4: Hata/Belirsiz
+                status: sonuc.PlaceIDDurum
             }
         });
 
@@ -331,5 +287,4 @@ app.use((req, res) => res.status(404).json({ success: false, error: 'Endpoint bu
 
 app.listen(PORT, () => {
     console.log(`Place ID Check API servisi çalışıyor: http://localhost:${PORT}`);
-    console.log(`Endpoint: POST /api/check`);
 });

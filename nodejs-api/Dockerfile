@@ -4,6 +4,9 @@ WORKDIR /app
 
 COPY package*.json ./
 
+# Curl kurulumu (PHP ile birebir aynı bot davranışını sergilemek için)
+RUN apk add --no-cache curl
+
 RUN npm install
 
 COPY . .
